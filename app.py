@@ -7,6 +7,7 @@ import re
 import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from copy import copy
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -14,6 +15,7 @@ from typing import Any, Iterable
 import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
+from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils.datetime import from_excel
 
@@ -473,29 +475,22 @@ def apply_table_style(ws, max_row: int, max_col: int):
     ws.freeze_panes = "A4" if ws.title == "日別" else "A3"
 
 
+
 def apply_workbook_font(wb, font_name: str = "Meiryo UI"):
+    """
+    ワークブック内すべてのセルを Meiryo UI に変更する。
+    既存の太字・サイズ・色などは維持する。
+    """
     for ws in wb.worksheets:
         for row in ws.iter_rows():
             for cell in row:
-                current = cell.font
-                cell.font = Font(
-                    name=font_name,
-                    size=current.sz,
-                    bold=current.bold,
-                    italic=current.italic,
-                    vertAlign=current.vertAlign,
-                    underline=current.underline,
-                    strike=current.strike,
-                    color=current.color,
-                    outline=current.outline,
-                    shadow=current.shadow,
-                    condense=current.condense,
-                    extend=current.extend,
-                    family=current.family,
-                    charset=current.charset,
-                    scheme=current.scheme,
-                )
+                if isinstance(cell, MergedCell):
+                    continue
 
+                new_font = copy(cell.font)
+                new_font.name = font_name
+                new_font.scheme = None
+                cell.font = new_font
 
 def export_excel(summary: pd.DataFrame, daily: pd.DataFrame, media: pd.DataFrame) -> bytes:
     if TEMPLATE_PATH.exists():
@@ -555,6 +550,7 @@ def export_excel(summary: pd.DataFrame, daily: pd.DataFrame, media: pd.DataFrame
     apply_workbook_font(wb)
     bio = io.BytesIO()
     wb.save(bio)
+    bio.seek(0)
     return bio.getvalue()
 
 
