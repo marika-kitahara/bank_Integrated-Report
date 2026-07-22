@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar
 import io
 import math
+import re
 import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -22,6 +23,48 @@ TEMPLATE_PATH = APP_DIR / "output_template.xlsx"
 AFF_CV_CELLS = ["W7", "AI7", "AU7", "BG7", "BS7"]
 AFF_COST_CELLS = ["Y7", "AK7", "AW7", "BI7", "BU7"]
 DISPLAY_ROWS = [32, 33, 34, 35]
+
+OPERATIONAL_MEDIA_DETAILS = {
+    "検索": [
+        "GAD_GEN_[01.公営競技]_C001",
+        "GAD_GEN_[04.円預金]_C002",
+        "GAD_GEN_[06.カード]_C003",
+        "GAD_GEN_[デビットカード切り出し]_C004",
+        "GAD_GEN_[円預金.子供口座]_C005",
+        "YSS_GEN_[01.公営競技]_STD_C001",
+        "YSS_GEN_[04.円預金]_STD_C002",
+        "YSS_GEN_[06.カード]_STD_C003",
+        "YSS_GEN_[円預金.子供口座]_STD_C005",
+        "YSS_GEN_[デビットカード切り出し]_STD_C004_[in_bank_4]",
+        "MSA_GEN_[04.円預金]_C002",
+        "MSA_GEN_[円預金.子供口座]_C005",
+        "MSA_GEN_[06.カード]_C003",
+        "MSA_GEN_[01.公営競技]_C001",
+        "配信開始後記載⑨",
+    ],
+    "ディスプレイ": [
+        "GDN_[04.円預金]_C002",
+        "GDN_[06.カード]_C002",
+        "LYDA_[04.円預金]_C001_[in_bank_15]",
+        "META_[04.円預金]",
+        "META_[06.カード]",
+        "SmartNews_[04.円預金]",
+        "X_[04.円預金]_C001",
+        "YouTube_スキップ不可_[in_bank_3]",
+    ],
+}
+
+OPERATIONAL_RAW_SHEETS = [
+    "【非表示】GDNローデータ",
+    "【非表示】Metaローデータ",
+    "【非表示】SmartNewsローデータ",
+    "【非表示】Xローデータ",
+    "【非表示】YDAローデータ",
+    "【非表示】MSAローデータ",
+    "【非表示】Yahooローデータ",
+    "【非表示】YouTubeローデータ",
+    "【非表示】Googleローデータ",
+]
 
 
 @dataclass
@@ -360,11 +403,60 @@ def build_daily(year, month, search_plan, display_plan, aff_plan, search_daily, 
     return base[order]
 
 
-def build_media(aff_matched: pd.DataFrame, search_actual: Metrics, display_actual: Metrics) -> pd.DataFrame:
-    rows = [
-        {"媒体カテゴリ": "検索", "媒体名称": "Search_合計", "媒体詳細": "", "コスト": search_actual.cost, "CV": search_actual.cv, "CPA": search_actual.cpa},
-        {"媒体カテゴリ": "ディスプレイ", "媒体名称": "Display_合計", "媒体詳細": "", "コスト": display_actual.cost, "CV": display_actual.cv, "CPA": display_actual.cpa},
-    ]
+def canonical_campaign_name(value: Any) -> str:
+    text = normalize_text(value)
+    # Monthly raw files may append a tracking suffix such as _[in_bank_3].
+    return re.sub(r"_?\[in_bank_\d+\]$", "", text, flags=re.IGNORECASE)
+
+
+def campaign_matches(actual: Any, target: str) -> bool:
+    actual_name = canonical_campaign_name(actual)
+    target_name = canonical_campaign_name(target)
+    return actual_name == target_name or actual_name.startswith(target_name + "_")
+
+
+def read_operational_media(file_bytes: bytes) -> pd.DataFrame:
+    reader = load_fast_xlsx(file_bytes)
+    targets = [(category, detail) for category, details in OPERATIONAL_MEDIA_DETAILS.items() for detail in details]
+    totals = {normalize_text(detail): {"コスト": 0.0, "CV": 0.0} for _, detail in targets}
+
+    available_sheets = [name for name in OPERATIONAL_RAW_SHEETS if name in reader.sheetnames]
+    if not available_sheets:
+        raise KeyError("運用型実績に対象のローデータシートが見つかりません。")
+
+    for sheet_name in available_sheets:
+        vals = reader.values(sheet_name)
+        for ref, raw_name in vals.items():
+            if not (ref.startswith("A") and ref[1:].isdigit()):
+                continue
+            matched_target = next((detail for _, detail in targets if campaign_matches(raw_name, detail)), None)
+            if matched_target is None:
+                continue
+            row_num = ref[1:]
+            key = normalize_text(matched_target)
+            totals[key]["コスト"] += safe_number(vals.get(f"G{row_num}"))
+            totals[key]["CV"] += safe_number(vals.get(f"H{row_num}"))
+
+    rows = []
+    for category, details in OPERATIONAL_MEDIA_DETAILS.items():
+        for detail in details:
+            normalized = normalize_text(detail)
+            cost = totals[normalized]["コスト"]
+            cv = totals[normalized]["CV"]
+            media_name = detail.split("_", 1)[0]
+            rows.append({
+                "媒体カテゴリ": category,
+                "媒体名称": media_name,
+                "媒体詳細": detail,
+                "コスト": cost,
+                "CV": cv,
+                "CPA": safe_div(cost, cv),
+            })
+    return pd.DataFrame(rows)
+
+
+def build_media(aff_matched: pd.DataFrame, operational_media: pd.DataFrame) -> pd.DataFrame:
+    rows = operational_media.to_dict("records")
     if not aff_matched.empty:
         grouped = aff_matched.groupby("_site", as_index=False)[["_cost", "_cv"]].sum()
         for _, r in grouped.iterrows():
@@ -379,6 +471,30 @@ def apply_table_style(ws, max_row: int, max_col: int):
             cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
             cell.alignment = Alignment(vertical="center")
     ws.freeze_panes = "A4" if ws.title == "日別" else "A3"
+
+
+def apply_workbook_font(wb, font_name: str = "Meiryo UI"):
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                current = cell.font
+                cell.font = Font(
+                    name=font_name,
+                    size=current.sz,
+                    bold=current.bold,
+                    italic=current.italic,
+                    vertAlign=current.vertAlign,
+                    underline=current.underline,
+                    strike=current.strike,
+                    color=current.color,
+                    outline=current.outline,
+                    shadow=current.shadow,
+                    condense=current.condense,
+                    extend=current.extend,
+                    family=current.family,
+                    charset=current.charset,
+                    scheme=current.scheme,
+                )
 
 
 def export_excel(summary: pd.DataFrame, daily: pd.DataFrame, media: pd.DataFrame) -> bytes:
@@ -436,6 +552,7 @@ def export_excel(summary: pd.DataFrame, daily: pd.DataFrame, media: pd.DataFrame
         for c,h in enumerate(headers,1): ws.cell(r,c,row[h])
         ws.cell(r,4).number_format='¥#,##0'; ws.cell(r,5).number_format='#,##0.00'; ws.cell(r,6).number_format='¥#,##0'
 
+    apply_workbook_font(wb)
     bio = io.BytesIO()
     wb.save(bio)
     return bio.getvalue()
@@ -501,13 +618,15 @@ def main():
                 search_plan, display_plan = read_operational_plan(op_plan_file.getvalue(), op_sheet)
                 aff_actual, aff_matched = read_aff_actual(aff_actual_file.getvalue(), aff_sites)
                 search_actual, display_actual, search_daily, display_daily = read_operational_actual(op_actual_file.getvalue())
+                operational_media = read_operational_media(op_actual_file.getvalue())
                 year, month = infer_month(search_daily, display_daily, aff_matched)
                 summary = build_summary(search_plan, display_plan, aff_plan, search_actual, display_actual, aff_actual)
                 daily = build_daily(year, month, search_plan, display_plan, aff_plan, search_daily, display_daily, aff_matched)
-                media = build_media(aff_matched, search_actual, display_actual)
+                media = build_media(aff_matched, operational_media)
                 excel_bytes = export_excel(summary, daily, media)
 
             st.session_state["result"] = (summary, daily, media, excel_bytes, year, month, len(aff_sites), aff_matched["_site"].nunique() if not aff_matched.empty else 0)
+            st.balloons()
         except Exception as exc:
             st.exception(exc)
 
