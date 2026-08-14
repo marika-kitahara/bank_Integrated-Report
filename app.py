@@ -140,8 +140,27 @@ class FastXlsxReader:
     def _read_shared_strings(self) -> list[str]:
         if "xl/sharedStrings.xml" not in self._zip.namelist():
             return []
+
         root = ET.fromstring(self._zip.read("xl/sharedStrings.xml"))
-        return ["".join(t.text or "" for t in si.iter(f"{{{NS_MAIN}}}t")) for si in root.findall(f"{{{NS_MAIN}}}si")]
+        strings = []
+
+        for si in root.findall(f"{{{NS_MAIN}}}si"):
+            parts = []
+
+            # 通常文字列
+            direct_t = si.find(f"{{{NS_MAIN}}}t")
+            if direct_t is not None:
+                parts.append(direct_t.text or "")
+
+            # リッチテキスト。ふりがな(rPh)はここには含めない
+            for run in si.findall(f"{{{NS_MAIN}}}r"):
+                t = run.find(f"{{{NS_MAIN}}}t")
+                if t is not None:
+                    parts.append(t.text or "")
+
+            strings.append("".join(parts))
+
+        return strings
 
     def _read_sheet_map(self) -> dict[str, dict[str, str]]:
         workbook = ET.fromstring(self._zip.read("xl/workbook.xml"))
@@ -218,42 +237,71 @@ def read_aff_plan(file_bytes: bytes, sheet_name: str) -> tuple[Metrics, set[str]
     return Metrics(cv=cv, cost=cost), sites
 
 
-def read_operational_plan(file_bytes: bytes, sheet_name: str) -> tuple[Metrics, Metrics]:
+def _operational_plan_rows(file_bytes: bytes, sheet_name: str) -> list[dict[str, Any]]:
     """
-    運用型プランの目標値を、選択したシートから条件集計する。
-
-    検索:
-      A列 = "検索" かつ F列 = "TOTAL"
-      CV = L列合計 / コスト = K列合計
-
-    ディスプレイ:
-      A列 = "ディスプレイ" かつ F列 = "TOTAL"
-      CV = L列合計 / コスト = K列合計
+    運用型プランの選択シートを行単位で読み取る。
+    A列/B列が空欄の行は、直前の値を引き継ぐ。
     """
     reader = load_fast_xlsx(file_bytes)
     vals = reader.values(sheet_name)
 
+    row_numbers = sorted({
+        int(m.group(1))
+        for ref in vals
+        if (m := re.fullmatch(r"[A-Z]+(\d+)", ref))
+    })
+
+    rows = []
+    last_category = ""
+    last_media_name = ""
+
+    for row_num in row_numbers:
+        raw_category = normalize_text(vals.get(f"A{row_num}"))
+        raw_media_name = normalize_text(vals.get(f"B{row_num}"))
+
+        if raw_category:
+            last_category = raw_category
+        if raw_media_name:
+            last_media_name = raw_media_name
+
+        rows.append({
+            "row": row_num,
+            "媒体カテゴリ": last_category,
+            "媒体名称": last_media_name,
+            "媒体詳細": normalize_text(vals.get(f"F{row_num}")),
+            "コスト": safe_number(vals.get(f"K{row_num}")),
+            "CV": safe_number(vals.get(f"L{row_num}")),
+        })
+
+    return rows
+
+
+def read_operational_plan(file_bytes: bytes, sheet_name: str) -> tuple[Metrics, Metrics]:
+    """
+    運用型プランの目標値を、選択したシートから条件集計する。
+
+    検索/ディスプレイともに:
+      F列 = TOTAL
+      コスト = K列
+      CV = L列
+
+    A列が空欄の場合は直前カテゴリを引き継ぐ。
+    #VALUE! などのエラー値は safe_number() により 0 として無視する。
+    """
     totals = {
         "検索": Metrics(),
         "ディスプレイ": Metrics(),
     }
 
-    for ref, raw_category in vals.items():
-        match = re.fullmatch(r"A(\\d+)", ref)
-        if not match:
+    for row in _operational_plan_rows(file_bytes, sheet_name):
+        category = row["媒体カテゴリ"]
+        detail = row["媒体詳細"]
+
+        if category not in totals or detail.upper() != "TOTAL":
             continue
 
-        row_num = match.group(1)
-        category = normalize_text(raw_category)
-        if category not in totals:
-            continue
-
-        detail = normalize_text(vals.get(f"F{row_num}"))
-        if detail.upper() != "TOTAL":
-            continue
-
-        totals[category].cost += safe_number(vals.get(f"K{row_num}"))
-        totals[category].cv += safe_number(vals.get(f"L{row_num}"))
+        totals[category].cost += row["コスト"]
+        totals[category].cv += row["CV"]
 
     return totals["検索"], totals["ディスプレイ"]
 
@@ -261,26 +309,30 @@ def read_operational_plan(file_bytes: bytes, sheet_name: str) -> tuple[Metrics, 
 def read_operational_plan_media(file_bytes: bytes, sheet_name: str) -> pd.DataFrame:
     """
     運用型プランの選択シートから媒体別出力のA～C列を作る。
+
       媒体カテゴリ = A列
       媒体名称     = B列
       媒体詳細     = F列
-    F列 = TOTAL の行は除外する。
+
+    F列 = TOTAL は除外。
+    A/Bが空欄の場合は直前値を引き継ぐ。
     """
+    rows = []
+
     reader = load_fast_xlsx(file_bytes)
     vals = reader.values(sheet_name)
 
-    rows = []
-    for ref, raw_category in vals.items():
-        match = re.fullmatch(r"A(\\d+)", ref)
-        if not match:
-            continue
+    row_numbers = sorted({
+        int(m.group(1))
+        for ref in vals
+        if (m := re.fullmatch(r"[A-Z]+(\d+)", ref))
+    })
 
-        row_num = match.group(1)
-        category = normalize_text(raw_category)
+    for row_num in row_numbers:
+        category = normalize_text(vals.get(f"A{row_num}"))
         media_name = normalize_text(vals.get(f"B{row_num}"))
         detail = normalize_text(vals.get(f"F{row_num}"))
 
-        # 運用型の媒体行だけを対象にし、見出しやTOTAL行は除外
         if category not in ("検索", "ディスプレイ"):
             continue
         if not media_name or not detail or detail.upper() == "TOTAL":
@@ -295,10 +347,12 @@ def read_operational_plan_media(file_bytes: bytes, sheet_name: str) -> pd.DataFr
     if not rows:
         return pd.DataFrame(columns=["媒体カテゴリ", "媒体名称", "媒体詳細"])
 
-    # 同一の A・B・F が複数行ある場合は媒体別では1行にまとめる
-    return pd.DataFrame(rows).drop_duplicates(
-        subset=["媒体カテゴリ", "媒体名称", "媒体詳細"]
-    ).reset_index(drop=True)
+    return (
+        pd.DataFrame(rows)
+        .drop_duplicates(subset=["媒体カテゴリ", "媒体名称", "媒体詳細"])
+        .reset_index(drop=True)
+    )
+
 
 def read_aff_actual(file_bytes: bytes, valid_sites: set[str]) -> tuple[Metrics, pd.DataFrame]:
     # Rakuten CSV is usually CP932. Fall back safely for UTF-8 exports.
@@ -490,20 +544,62 @@ def campaign_matches(actual: Any, target: str) -> bool:
     return actual_name == target_name or actual_name.startswith(target_name + "_")
 
 
+def _media_name_matches_campaign(media_name: Any, campaign_name: Any) -> bool:
+    """
+    プランB列の媒体名称と、実績ローデータA列のキャンペーン名を対応付ける。
+    """
+    media = normalize_text(media_name).upper().replace(" ", "")
+    campaign = normalize_text(campaign_name).upper().replace(" ", "")
+
+    if media in ("P-MAX", "PMAX", "P_MAX"):
+        prefixes = ("PMAX_", "P-MAX_", "P_MAX_")
+    else:
+        aliases = {
+            "GSA": ("GAD_", "GSA_"),
+            "YSA": ("YSS_", "YSA_"),
+            "MSA": ("MSA_",),
+            "GDN": ("GDN_",),
+            "YDN": ("LYDA_", "YDA_", "YDN_"),
+            "META": ("META_",),
+            "X": ("X_",),
+            "SMARTNEWS": ("SMARTNEWS_",),
+            "TIKTOK": ("TIKTOK_",),
+            "YOUTUBE": ("YOUTUBE_",),
+        }
+        prefixes = aliases.get(media, (f"{media}_",))
+
+    return any(campaign.startswith(prefix) for prefix in prefixes)
+
+
+def _detail_matches_campaign(detail: Any, campaign_name: Any) -> bool:
+    """
+    プランF列の媒体詳細と、実績キャンペーン名の案件部分を対応付ける。
+    """
+    d = normalize_text(detail)
+    c = normalize_text(campaign_name)
+
+    if d == "公営競技":
+        return "公営競技" in c
+
+    if d == "子供口座":
+        return "子供口座" in c
+
+    if d == "デビットカード切り出し":
+        return "デビット" in c
+
+    if d == "円預金":
+        return "円預金" in c and "子供口座" not in c
+
+    if d == "カード":
+        return "カード" in c and "デビット" not in c
+
+    return d != "" and d in c
+
+
 def read_operational_media(file_bytes: bytes, plan_media: pd.DataFrame) -> pd.DataFrame:
     """
-    運用型実績のローデータを媒体詳細単位で集計し、
-    運用型プランから取得した
-      A: 媒体カテゴリ
-      B: 媒体名称
-      C: 媒体詳細
-    の組み合わせごとに D:F（コスト・CV・CPA）を返す。
-
-    実績ローデータ側は従来どおり、
-      A列 = キャンペーン名
-      G列 = コスト
-      H列 = CV
-    を参照する。
+    運用型プランの A/B/F の組み合わせごとに、
+    運用型実績ローデータから コスト・CV・CPA を集計する。
     """
     if plan_media.empty:
         return pd.DataFrame(
@@ -511,42 +607,57 @@ def read_operational_media(file_bytes: bytes, plan_media: pd.DataFrame) -> pd.Da
         )
 
     reader = load_fast_xlsx(file_bytes)
-    available_sheets = [name for name in OPERATIONAL_RAW_SHEETS if name in reader.sheetnames]
+    available_sheets = [
+        name for name in OPERATIONAL_RAW_SHEETS
+        if name in reader.sheetnames
+    ]
     if not available_sheets:
         raise KeyError("運用型実績に対象のローデータシートが見つかりません。")
 
-    # 媒体詳細ごとに実績を集計する。
-    # 実績側キャンペーン末尾の _[in_bank_n] 等は既存仕様どおり吸収する。
-    details = plan_media["媒体詳細"].dropna().map(normalize_text).unique().tolist()
-    totals = {detail: {"コスト": 0.0, "CV": 0.0} for detail in details}
-
+    actual_rows = []
     for sheet_name in available_sheets:
         vals = reader.values(sheet_name)
-        for ref, raw_name in vals.items():
+
+        for ref, raw_campaign in vals.items():
             match = re.fullmatch(r"A(\d+)", ref)
             if not match:
                 continue
 
-            matched_detail = next(
-                (detail for detail in details if campaign_matches(raw_name, detail)),
-                None,
-            )
-            if matched_detail is None:
+            campaign = normalize_text(raw_campaign)
+            if not campaign:
                 continue
 
             row_num = match.group(1)
-            totals[matched_detail]["コスト"] += safe_number(vals.get(f"G{row_num}"))
-            totals[matched_detail]["CV"] += safe_number(vals.get(f"H{row_num}"))
+            actual_rows.append({
+                "campaign": campaign,
+                "コスト": safe_number(vals.get(f"G{row_num}")),
+                "CV": safe_number(vals.get(f"H{row_num}")),
+            })
 
     rows = []
+
     for _, plan_row in plan_media.iterrows():
+        category = normalize_text(plan_row["媒体カテゴリ"])
+        media_name = normalize_text(plan_row["媒体名称"])
         detail = normalize_text(plan_row["媒体詳細"])
-        cost = totals.get(detail, {}).get("コスト", 0.0)
-        cv = totals.get(detail, {}).get("CV", 0.0)
+
+        cost = 0.0
+        cv = 0.0
+
+        for actual in actual_rows:
+            campaign = actual["campaign"]
+
+            if not _media_name_matches_campaign(media_name, campaign):
+                continue
+            if not _detail_matches_campaign(detail, campaign):
+                continue
+
+            cost += actual["コスト"]
+            cv += actual["CV"]
 
         rows.append({
-            "媒体カテゴリ": plan_row["媒体カテゴリ"],
-            "媒体名称": plan_row["媒体名称"],
+            "媒体カテゴリ": category,
+            "媒体名称": media_name,
             "媒体詳細": detail,
             "コスト": cost,
             "CV": cv,
