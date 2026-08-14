@@ -239,25 +239,31 @@ def read_aff_plan(file_bytes: bytes, sheet_name: str) -> tuple[Metrics, set[str]
 
 def _operational_plan_rows(file_bytes: bytes, sheet_name: str) -> list[dict[str, Any]]:
     """
-    運用型プランの選択シートを行単位で読み取る。
-    A列/B列が空欄の行は、直前の値を引き継ぐ。
-    """
-    reader = load_fast_xlsx(file_bytes)
-    vals = reader.values(sheet_name)
+    運用型プランだけは openpyxl(data_only=True) で直接読む。
+    Excelに保存済みの計算結果をそのまま取得するため、
+    数式セル・日本語文字列・共有文字列の影響を受けにくい。
 
-    row_numbers = sorted({
-        int(m.group(1))
-        for ref in vals
-        if (m := re.fullmatch(r"[A-Z]+(\d+)", ref))
-    })
+    A列/B列が空欄のTOTAL行は、直前の値を引き継ぐ。
+    #VALUE! や "-" は safe_number() で 0 として無視する。
+    """
+    wb = load_workbook(
+        io.BytesIO(file_bytes),
+        data_only=True,
+        read_only=True,
+    )
+
+    if sheet_name not in wb.sheetnames:
+        raise KeyError(f"シート『{sheet_name}』が見つかりません。")
+
+    ws = wb[sheet_name]
 
     rows = []
     last_category = ""
     last_media_name = ""
 
-    for row_num in row_numbers:
-        raw_category = normalize_text(vals.get(f"A{row_num}"))
-        raw_media_name = normalize_text(vals.get(f"B{row_num}"))
+    for row_num in range(1, ws.max_row + 1):
+        raw_category = normalize_text(ws.cell(row_num, 1).value)   # A
+        raw_media_name = normalize_text(ws.cell(row_num, 2).value) # B
 
         if raw_category:
             last_category = raw_category
@@ -268,11 +274,12 @@ def _operational_plan_rows(file_bytes: bytes, sheet_name: str) -> list[dict[str,
             "row": row_num,
             "媒体カテゴリ": last_category,
             "媒体名称": last_media_name,
-            "媒体詳細": normalize_text(vals.get(f"F{row_num}")),
-            "コスト": safe_number(vals.get(f"K{row_num}")),
-            "CV": safe_number(vals.get(f"L{row_num}")),
+            "媒体詳細": normalize_text(ws.cell(row_num, 6).value), # F
+            "コスト": safe_number(ws.cell(row_num, 11).value),     # K
+            "CV": safe_number(ws.cell(row_num, 12).value),         # L
         })
 
+    wb.close()
     return rows
 
 
@@ -315,23 +322,23 @@ def read_operational_plan_media(file_bytes: bytes, sheet_name: str) -> pd.DataFr
       媒体詳細     = F列
 
     F列 = TOTAL は除外。
-    A/Bが空欄の場合は直前値を引き継ぐ。
     """
+    wb = load_workbook(
+        io.BytesIO(file_bytes),
+        data_only=True,
+        read_only=True,
+    )
+
+    if sheet_name not in wb.sheetnames:
+        raise KeyError(f"シート『{sheet_name}』が見つかりません。")
+
+    ws = wb[sheet_name]
     rows = []
 
-    reader = load_fast_xlsx(file_bytes)
-    vals = reader.values(sheet_name)
-
-    row_numbers = sorted({
-        int(m.group(1))
-        for ref in vals
-        if (m := re.fullmatch(r"[A-Z]+(\d+)", ref))
-    })
-
-    for row_num in row_numbers:
-        category = normalize_text(vals.get(f"A{row_num}"))
-        media_name = normalize_text(vals.get(f"B{row_num}"))
-        detail = normalize_text(vals.get(f"F{row_num}"))
+    for row_num in range(1, ws.max_row + 1):
+        category = normalize_text(ws.cell(row_num, 1).value)
+        media_name = normalize_text(ws.cell(row_num, 2).value)
+        detail = normalize_text(ws.cell(row_num, 6).value)
 
         if category not in ("検索", "ディスプレイ"):
             continue
@@ -343,6 +350,8 @@ def read_operational_plan_media(file_bytes: bytes, sheet_name: str) -> pd.DataFr
             "媒体名称": media_name,
             "媒体詳細": detail,
         })
+
+    wb.close()
 
     if not rows:
         return pd.DataFrame(columns=["媒体カテゴリ", "媒体名称", "媒体詳細"])
