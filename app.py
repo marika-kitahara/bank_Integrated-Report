@@ -68,7 +68,6 @@ OPERATIONAL_RAW_SHEETS = [
     "【非表示】Googleローデータ",
 ]
 
-
 @dataclass
 class Metrics:
     cv: float = 0.0
@@ -77,7 +76,6 @@ class Metrics:
     @property
     def cpa(self) -> float:
         return safe_div(self.cost, self.cv)
-
 
 def safe_number(value: Any) -> float:
     if value is None or value == "":
@@ -96,14 +94,11 @@ def safe_number(value: Any) -> float:
     except ValueError:
         return 0.0
 
-
 def safe_div(numerator: float, denominator: float) -> float:
     return numerator / denominator if denominator not in (0, 0.0) else 0.0
 
-
 def normalize_text(value: Any) -> str:
     return str(value or "").replace("\u3000", " ").strip()
-
 
 def normalize_datetime(value: Any, epoch=None) -> datetime | None:
     if value is None or value == "":
@@ -122,11 +117,9 @@ def normalize_datetime(value: Any, epoch=None) -> datetime | None:
         return None
     return parsed.to_pydatetime()
 
-
 NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 NS_PKG = "http://schemas.openxmlformats.org/package/2006/relationships"
-
 
 class FastXlsxReader:
     """Reads cached Excel values directly from the XLSX ZIP, including hidden sheets."""
@@ -147,12 +140,10 @@ class FastXlsxReader:
         for si in root.findall(f"{{{NS_MAIN}}}si"):
             parts = []
 
-            # 通常文字列
             direct_t = si.find(f"{{{NS_MAIN}}}t")
             if direct_t is not None:
                 parts.append(direct_t.text or "")
 
-            # リッチテキスト。ふりがな(rPh)はここには含めない
             for run in si.findall(f"{{{NS_MAIN}}}r"):
                 t = run.find(f"{{{NS_MAIN}}}t")
                 if t is not None:
@@ -211,7 +202,6 @@ class FastXlsxReader:
     def cell(self, sheet_name: str, address: str) -> Any:
         return self.values(sheet_name).get(address)
 
-
 @st.cache_resource(show_spinner=False)
 def load_fast_xlsx(file_bytes: bytes):
     return FastXlsxReader(file_bytes)
@@ -220,13 +210,11 @@ def load_fast_xlsx(file_bytes: bytes):
 def selectable_sheets(file_bytes: bytes) -> list[str]:
     return load_fast_xlsx(file_bytes).sheetnames
 
-
 def sheet_state(file_bytes: bytes, sheet_name: str) -> str:
     return load_fast_xlsx(file_bytes).sheet_state(sheet_name)
 
 def get_cached_cell(reader: FastXlsxReader, sheet_name: str, address: str) -> float:
     return safe_number(reader.cell(sheet_name, address))
-
 
 def read_aff_plan(file_bytes: bytes, sheet_name: str) -> tuple[Metrics, set[str]]:
     reader = load_fast_xlsx(file_bytes)
@@ -236,7 +224,6 @@ def read_aff_plan(file_bytes: bytes, sheet_name: str) -> tuple[Metrics, set[str]
     sites = {normalize_text(v) for ref, v in vals.items() if ref[0] == "A" and ref[1:].isdigit() and normalize_text(v)}
     return Metrics(cv=cv, cost=cost), sites
 
-
 def _operational_plan_rows(file_bytes: bytes, sheet_name: str) -> list[dict[str, Any]]:
     """
     運用型プランだけは openpyxl(data_only=True) で直接読む。
@@ -244,7 +231,6 @@ def _operational_plan_rows(file_bytes: bytes, sheet_name: str) -> list[dict[str,
     数式セル・日本語文字列・共有文字列の影響を受けにくい。
 
     A列/B列が空欄のTOTAL行は、直前の値を引き継ぐ。
-    #VALUE! や "-" は safe_number() で 0 として無視する。
     """
     wb = load_workbook(
         io.BytesIO(file_bytes),
@@ -282,7 +268,6 @@ def _operational_plan_rows(file_bytes: bytes, sheet_name: str) -> list[dict[str,
     wb.close()
     return rows
 
-
 def read_operational_plan(file_bytes: bytes, sheet_name: str) -> tuple[Metrics, Metrics]:
     """
     運用型プランの目標値を、選択したシートから条件集計する。
@@ -293,7 +278,6 @@ def read_operational_plan(file_bytes: bytes, sheet_name: str) -> tuple[Metrics, 
       CV = L列
 
     A列が空欄の場合は直前カテゴリを引き継ぐ。
-    #VALUE! などのエラー値は safe_number() により 0 として無視する。
     """
     totals = {
         "検索": Metrics(),
@@ -311,7 +295,6 @@ def read_operational_plan(file_bytes: bytes, sheet_name: str) -> tuple[Metrics, 
         totals[category].cv += row["CV"]
 
     return totals["検索"], totals["ディスプレイ"]
-
 
 def read_operational_plan_media(file_bytes: bytes, sheet_name: str) -> pd.DataFrame:
     """
@@ -362,7 +345,6 @@ def read_operational_plan_media(file_bytes: bytes, sheet_name: str) -> pd.DataFr
         .reset_index(drop=True)
     )
 
-
 def read_aff_actual(file_bytes: bytes, valid_sites: set[str]) -> tuple[Metrics, pd.DataFrame]:
     # Rakuten CSV is usually CP932. Fall back safely for UTF-8 exports.
     df = None
@@ -388,7 +370,6 @@ def read_aff_actual(file_bytes: bytes, valid_sites: set[str]) -> tuple[Metrics, 
     actual = Metrics(cv=float(matched["_cv"].sum()), cost=float(matched["_cost"].sum()))
     return actual, matched
 
-
 def find_sheet_name(reader: FastXlsxReader, wanted: str) -> str:
     candidates = [wanted, f"【{wanted}】"]
     for name in candidates:
@@ -400,7 +381,6 @@ def find_sheet_name(reader: FastXlsxReader, wanted: str) -> str:
             return name
     raise KeyError(f"シート『{wanted}』が見つかりません。")
 
-
 def excel_serial_to_datetime(value: Any) -> datetime | None:
     if isinstance(value, (int, float)):
         try:
@@ -409,14 +389,12 @@ def excel_serial_to_datetime(value: Any) -> datetime | None:
             return None
     return normalize_datetime(value)
 
-
 def detect_daily_date_column(vals: dict[str, Any], start_row: int = 23, end_row: int = 60) -> int:
     for col_num, col_letter in ((1, "A"), (2, "B")):
         found = sum(1 for row in range(start_row, end_row + 1) if excel_serial_to_datetime(vals.get(f"{col_letter}{row}")))
         if found >= 2:
             return col_num
     raise ValueError("日付列（A列またはB列）を判定できませんでした。")
-
 
 def read_operational_actual(file_bytes: bytes) -> tuple[Metrics, Metrics, pd.DataFrame, pd.DataFrame]:
     reader = load_fast_xlsx(file_bytes)
@@ -453,10 +431,8 @@ def infer_month(search_daily: pd.DataFrame, display_daily: pd.DataFrame, aff_mat
     if not dates:
         today = date.today()
         return today.year, today.month
-    # The operational report contains all calendar dates, so use its earliest date.
     d = min(dates)
     return d.year, d.month
-
 
 def build_summary(search_plan, display_plan, aff_plan, search_actual, display_actual, aff_actual) -> pd.DataFrame:
     rows = []
@@ -488,7 +464,6 @@ def build_summary(search_plan, display_plan, aff_plan, search_actual, display_ac
         "CPA 目標": total_target.cpa, "CPA 実績": total_actual.cpa, "CPA TVA": safe_div(total_target.cpa, total_actual.cpa),
     })
     return pd.DataFrame(rows)
-
 
 def build_daily(year, month, search_plan, display_plan, aff_plan, search_daily, display_daily, aff_matched) -> pd.DataFrame:
     days = calendar.monthrange(year, month)[1]
@@ -540,12 +515,9 @@ def build_daily(year, month, search_plan, display_plan, aff_plan, search_daily, 
             order += [f"{kind} {prefix} CV", f"{kind} {prefix} コスト", f"{kind} {prefix} CPA"]
     return base[order]
 
-
 def canonical_campaign_name(value: Any) -> str:
     text = normalize_text(value)
-    # Monthly raw files may append a tracking suffix such as _[in_bank_3].
     return re.sub(r"_?\[in_bank_\d+\]$", "", text, flags=re.IGNORECASE)
-
 
 def campaign_matches(actual: Any, target: str) -> bool:
     actual_name = canonical_campaign_name(actual)
@@ -579,7 +551,6 @@ def _media_name_matches_campaign(media_name: Any, campaign_name: Any) -> bool:
 
     return any(campaign.startswith(prefix) for prefix in prefixes)
 
-
 def _detail_matches_campaign(detail: Any, campaign_name: Any) -> bool:
     """
     プランF列の媒体詳細と、実績キャンペーン名の案件部分を対応付ける。
@@ -603,7 +574,6 @@ def _detail_matches_campaign(detail: Any, campaign_name: Any) -> bool:
         return "カード" in c and "デビット" not in c
 
     return d != "" and d in c
-
 
 def read_operational_media(file_bytes: bytes, plan_media: pd.DataFrame) -> pd.DataFrame:
     """
@@ -675,7 +645,6 @@ def read_operational_media(file_bytes: bytes, plan_media: pd.DataFrame) -> pd.Da
 
     return pd.DataFrame(rows)
 
-
 def build_media(aff_matched: pd.DataFrame, operational_media: pd.DataFrame) -> pd.DataFrame:
     rows = operational_media.to_dict("records")
     if not aff_matched.empty:
@@ -684,7 +653,6 @@ def build_media(aff_matched: pd.DataFrame, operational_media: pd.DataFrame) -> p
             rows.append({"媒体カテゴリ": "AFF", "媒体名称": r["_site"], "媒体詳細": "", "コスト": r["_cost"], "CV": r["_cv"], "CPA": safe_div(r["_cost"], r["_cv"])})
     return pd.DataFrame(rows)
 
-
 def apply_table_style(ws, max_row: int, max_col: int):
     thin = Side(style="thin", color="D9E1F2")
     for row in ws.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=max_col):
@@ -692,8 +660,6 @@ def apply_table_style(ws, max_row: int, max_col: int):
             cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
             cell.alignment = Alignment(vertical="center")
     ws.freeze_panes = "A4" if ws.title == "日別" else "A3"
-
-
 
 def apply_workbook_font(wb, font_name: str = "Meiryo UI"):
     """
@@ -721,7 +687,6 @@ def export_excel(summary: pd.DataFrame, daily: pd.DataFrame, media: pd.DataFrame
         wb.create_sheet("日別")
         wb.create_sheet("媒体別")
 
-    # 合算
     ws = wb["合算"]
     for r in range(3, 7):
         row = summary.iloc[r - 3]
@@ -737,7 +702,6 @@ def export_excel(summary: pd.DataFrame, daily: pd.DataFrame, media: pd.DataFrame
     for col in (5,6,8,9):
         for r in range(3,7): ws.cell(r,col).number_format = '¥#,##0'
 
-    # 日別: template has 3 header rows, write row 4 onward.
     ws = wb["日別"]
     for row_idx, row in daily.iterrows():
         excel_row = row_idx + 4
@@ -751,11 +715,9 @@ def export_excel(summary: pd.DataFrame, daily: pd.DataFrame, media: pd.DataFrame
                     ws.cell(excel_row, col, float(value))
                     ws.cell(excel_row, col).number_format = '0.0%' if kind == "目標vs実績" else ('¥#,##0' if metric in ("コスト", "CPA") else '#,##0.00')
                     col += 1
-    # clear any template date rows beyond selected month
     for r in range(4 + len(daily), ws.max_row + 1):
         for c in range(1, 38): ws.cell(r,c).value = None
 
-    # 媒体別
     ws = wb["媒体別"]
     headers = ["媒体カテゴリ", "媒体名称", "媒体詳細", "コスト", "CV", "CPA"]
     for c,h in enumerate(headers,1): ws.cell(1,c,h)
@@ -771,7 +733,6 @@ def export_excel(summary: pd.DataFrame, daily: pd.DataFrame, media: pd.DataFrame
     wb.save(bio)
     bio.seek(0)
     return bio.getvalue()
-
 
 def display_summary(df: pd.DataFrame):
     styled = df.copy()
@@ -789,7 +750,6 @@ def display_summary(df: pd.DataFrame):
             "CPA 実績": st.column_config.NumberColumn(format="¥%,.0f"),
         },
     )
-
 
 def main():
     st.set_page_config(page_title="統合レポート作成", layout="wide")
